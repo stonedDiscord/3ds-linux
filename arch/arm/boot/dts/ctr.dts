@@ -81,6 +81,18 @@
 			no-output;
 		};
 
+		nwm: sdhc-controller@10122000 {
+			compatible = "nintendo,ctr-sdhc";
+			reg = <0x10122000 0x200>;
+
+			interrupts =
+				<GIC_SPI 0x20 IRQ_TYPE_EDGE_RISING>,
+				<GIC_SPI 0x21 IRQ_TYPE_EDGE_RISING>;
+
+			cap-sdio-irq;
+			cap-sd-highspeed;
+		};
+
 		pxi: virtio-bridge@10163000 {
 			compatible = "nintendo,ctr-pxi";
 			reg = <0x10163000 0x10>;
