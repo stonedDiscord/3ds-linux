@@ -2,16 +2,12 @@
 /*
  *  ctr_pxi.c
  *
- *  Copyright (C) 2020-2021 Wolfvak
+ *  Copyright (C) 2020-2021 Santiago Herrera
  *
  *  Based on virtio_mmio.c
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
-#define DRIVER_NAME "ctr-pxi"
+#define DRIVER_NAME "3ds-pxi"
 #define pr_fmt(str)	DRIVER_NAME ": " str
 
 #include <linux/io.h>
@@ -662,7 +658,7 @@ static struct platform_driver ctr_pxi_driver = {
 };
 module_platform_driver(ctr_pxi_driver);
 
-MODULE_AUTHOR("Wolfvak");
+MODULE_AUTHOR("Santiago Herrera");
 MODULE_DESCRIPTION("Nintendo 3DS PXI virtio bridge");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform: " DRIVER_NAME);

@@ -4,10 +4,7 @@
  *
  * Copyright (C) 2016 Sergi Granell
  * Copyright (C) 2021 Santiago Herrera
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
+ * Copyright (C) 2021 Nick Desaulniers
  */
 
 #include <linux/delay.h>
@@ -29,7 +26,6 @@
  */
 
 #define SECONDARY_STARTUP_ADDR(n)	(0x1FFFFFF0 + ((n)*4))
-#define SCU_BASE_ADDR		0x17E00000
 
 static int ctr_smp_boot_secondary(unsigned int cpu,
 				    struct task_struct *idle)
@@ -49,17 +45,25 @@ static int ctr_smp_boot_secondary(unsigned int cpu,
 	return 0;
 }
 
-static void ctr_smp_prepare_cpus(unsigned int max_cpus)
+static void __init ctr_smp_prepare_cpus(unsigned int max_cpus)
 {
+	struct device_node *np;
 	void __iomem *scu_base;
+	unsigned int i, ncores;
 
-	scu_base = ioremap(SCU_BASE_ADDR, SZ_256);
-	scu_enable(scu_base);
-	iounmap(scu_base);
+	np = of_find_compatible_node(NULL, NULL, "arm,arm11mp-scu");
+	if (np) {
+		scu_base = of_iomap(np, 0);
+		scu_enable(scu_base);
+		ncores = scu_get_core_count(scu_base);
+		for (i = 0; i != ncores; ++i)
+			set_cpu_possible(i, true);
+		of_node_put(np);
+	}
 }
 
 static const struct smp_operations ctr_smp_ops __initconst = {
 	.smp_prepare_cpus	= ctr_smp_prepare_cpus,
 	.smp_boot_secondary	= ctr_smp_boot_secondary,
 };
-CPU_METHOD_OF_DECLARE(ctr_smp, "nintendo,ctr-smp", &ctr_smp_ops);
+CPU_METHOD_OF_DECLARE(ctr_smp, "nintendo,3ds-smp", &ctr_smp_ops);

@@ -1,14 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ctr/accel.c
  *
- * Copyright (C) 2021 Wolfvak
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ * Copyright (C) 2021 Santiago Herrera
  */
 
-#define DRIVER_NAME	"ctrmcu-accel"
+#define DRIVER_NAME	"3dsmcu-accel"
 #define pr_fmt(fmt)	DRIVER_NAME ": " fmt
 
 /*
@@ -206,6 +203,6 @@ static struct platform_driver ctr_mcu_accel_driver = {
 module_platform_driver(ctr_mcu_accel_driver);
 
 MODULE_DESCRIPTION("Nintendo 3DS MCU Accelerometer driver");
-MODULE_AUTHOR("Wolfvak");
+MODULE_AUTHOR("Santiago Herrera");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:" DRIVER_NAME);
