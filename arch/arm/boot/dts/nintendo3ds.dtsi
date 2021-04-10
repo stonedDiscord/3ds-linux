@@ -241,7 +241,7 @@
 			sc16is750: infrared@4d {
 				compatible = "nxp,sc16is750";
 				reg = <0x4d>;
-				clock-frequency = <18432000>;
+				clocks = <&irclk>;
 
 				interrupts-extended = <&irintpin IRQ_TYPE_EDGE_FALLING>;
 
@@ -388,6 +388,13 @@
 		clock-div = <1>;
 		clock-mult = <2>;
 		clock-output-names = "3ds:refclk268mhz";
+	};
+
+	irclk: xtal18mhz {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <18432000>;
+		clock-output-names = "3ds:xtal18mhz";
 	};
 
 	poweroff: poweroff {
