@@ -15,6 +15,14 @@ menuconfig NINTENDO3DS_PLATFORM_DEVICES
 
 if NINTENDO3DS_PLATFORM_DEVICES
 
+config CTR_SDHC
+	tristate "Nintendo 3DS SD Host Controller"
+	select MMC
+	default y
+	help
+	  Add support for driving the 3DS SD Host Controller.
+	  Note: the controller is only used for the wireless chip.
+
 config CTR_PXI
 	tristate "Nintendo 3DS VirtIO bridge"
 	select VIRTIO
