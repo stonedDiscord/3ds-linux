@@ -10,6 +10,7 @@
 #include <asm/mmu.h>
 #include <asm/setup.h>
 #include <asm/smp.h>
+#include <asm/firmware.h>
 
 #include <linux/pkeys.h>
 #include <linux/of_fdt.h>
@@ -31,6 +32,7 @@ static u32 initial_allocation_mask __ro_after_init;
 u64 default_amr __ro_after_init  = ~0x0UL;
 u64 default_iamr __ro_after_init = 0x5555555555555555UL;
 u64 default_uamor __ro_after_init;
+EXPORT_SYMBOL(default_amr);
 /*
  * Key used to implement PROT_EXEC mmap. Denies READ/WRITE
  * We pick key 2 because 0 is special key and 1 is reserved as per ISA.
@@ -65,7 +67,7 @@ static int __init dt_scan_storage_keys(unsigned long node,
 	return 1;
 }
 
-static int scan_pkey_feature(void)
+static int __init scan_pkey_feature(void)
 {
 	int ret;
 	int pkeys_total = 0;
@@ -87,7 +89,8 @@ static int scan_pkey_feature(void)
 			unsigned long pvr = mfspr(SPRN_PVR);
 
 			if (PVR_VER(pvr) == PVR_POWER8 || PVR_VER(pvr) == PVR_POWER8E ||
-			    PVR_VER(pvr) == PVR_POWER8NVL || PVR_VER(pvr) == PVR_POWER9)
+			    PVR_VER(pvr) == PVR_POWER8NVL || PVR_VER(pvr) == PVR_POWER9 ||
+			    PVR_VER(pvr) == PVR_HX_C2000)
 				pkeys_total = 32;
 		}
 	}
@@ -289,7 +292,7 @@ void setup_kuap(bool disabled)
 
 	if (smp_processor_id() == boot_cpuid) {
 		pr_info("Activating Kernel Userspace Access Prevention\n");
-		cur_cpu_spec->mmu_features |= MMU_FTR_BOOK3S_KUAP;
+		cur_cpu_spec->mmu_features |= MMU_FTR_KUAP;
 	}
 
 	/*
@@ -299,19 +302,6 @@ void setup_kuap(bool disabled)
 	isync();
 }
 #endif
-
-static inline void update_current_thread_amr(u64 value)
-{
-	current->thread.regs->amr = value;
-}
-
-static inline void update_current_thread_iamr(u64 value)
-{
-	if (!likely(pkey_execute_disable_supported))
-		return;
-
-	current->thread.regs->iamr = value;
-}
 
 #ifdef CONFIG_PPC_MEM_KEYS
 void pkey_mm_init(struct mm_struct *mm)
@@ -327,7 +317,7 @@ static inline void init_amr(int pkey, u8 init_bits)
 	u64 new_amr_bits = (((u64)init_bits & 0x3UL) << pkeyshift(pkey));
 	u64 old_amr = current_thread_amr() & ~((u64)(0x3ul) << pkeyshift(pkey));
 
-	update_current_thread_amr(old_amr | new_amr_bits);
+	current->thread.regs->amr = old_amr | new_amr_bits;
 }
 
 static inline void init_iamr(int pkey, u8 init_bits)
@@ -335,7 +325,10 @@ static inline void init_iamr(int pkey, u8 init_bits)
 	u64 new_iamr_bits = (((u64)init_bits & 0x1UL) << pkeyshift(pkey));
 	u64 old_iamr = current_thread_iamr() & ~((u64)(0x1ul) << pkeyshift(pkey));
 
-	update_current_thread_iamr(old_iamr | new_iamr_bits);
+	if (!likely(pkey_execute_disable_supported))
+		return;
+
+	current->thread.regs->iamr = old_iamr | new_iamr_bits;
 }
 
 /*

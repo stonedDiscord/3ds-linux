@@ -171,6 +171,7 @@ static const struct atmdev_ops atm_ops = {
 static struct timer_list ns_timer;
 static char *mac[NS_MAX_CARDS];
 module_param_array(mac, charp, NULL, 0);
+MODULE_DESCRIPTION("ATM NIC driver for IDT 77201/77211 \"NICStAR\" and Fore ForeRunnerLE.");
 MODULE_LICENSE("GPL");
 
 /* Functions */
@@ -299,7 +300,7 @@ static void __exit nicstar_cleanup(void)
 {
 	XPRINTK("nicstar: nicstar_cleanup() called.\n");
 
-	del_timer(&ns_timer);
+	del_timer_sync(&ns_timer);
 
 	pci_unregister_driver(&nicstar_driver);
 
@@ -527,6 +528,15 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
 	/* Set the VPI/VCI MSb mask to zero so we can receive OAM cells */
 	writel(0x00000000, card->membase + VPM);
 
+	card->intcnt = 0;
+	if (request_irq
+	    (pcidev->irq, &ns_irq_handler, IRQF_SHARED, "nicstar", card) != 0) {
+		pr_err("nicstar%d: can't allocate IRQ %d.\n", i, pcidev->irq);
+		error = 9;
+		ns_init_card_error(card, error);
+		return error;
+	}
+
 	/* Initialize TSQ */
 	card->tsq.org = dma_alloc_coherent(&card->pcidev->dev,
 					   NS_TSQSIZE + NS_TSQ_ALIGNMENT,
@@ -753,15 +763,6 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
 
 	card->efbie = 1;
 
-	card->intcnt = 0;
-	if (request_irq
-	    (pcidev->irq, &ns_irq_handler, IRQF_SHARED, "nicstar", card) != 0) {
-		printk("nicstar%d: can't allocate IRQ %d.\n", i, pcidev->irq);
-		error = 9;
-		ns_init_card_error(card, error);
-		return error;
-	}
-
 	/* Register device */
 	card->atmdev = atm_dev_register("nicstar", &card->pcidev->dev, &atm_ops,
 					-1, NULL);
@@ -839,10 +840,12 @@ static void ns_init_card_error(ns_dev *card, int error)
 			dev_kfree_skb_any(hb);
 	}
 	if (error >= 12) {
-		kfree(card->rsq.org);
+		dma_free_coherent(&card->pcidev->dev, NS_RSQSIZE + NS_RSQ_ALIGNMENT,
+				card->rsq.org, card->rsq.dma);
 	}
 	if (error >= 11) {
-		kfree(card->tsq.org);
+		dma_free_coherent(&card->pcidev->dev, NS_TSQSIZE + NS_TSQ_ALIGNMENT,
+				card->tsq.org, card->tsq.dma);
 	}
 	if (error >= 10) {
 		free_irq(card->pcidev->irq, card);
@@ -859,7 +862,6 @@ static void ns_init_card_error(ns_dev *card, int error)
 static scq_info *get_scq(ns_dev *card, int size, u32 scd)
 {
 	scq_info *scq;
-	int i;
 
 	if (size != VBR_SCQSIZE && size != CBR_SCQSIZE)
 		return NULL;
@@ -873,9 +875,8 @@ static scq_info *get_scq(ns_dev *card, int size, u32 scd)
 		kfree(scq);
 		return NULL;
 	}
-	scq->skb = kmalloc_array(size / NS_SCQE_SIZE,
-				 sizeof(*scq->skb),
-				 GFP_KERNEL);
+	scq->skb = kcalloc(size / NS_SCQE_SIZE, sizeof(*scq->skb),
+			   GFP_KERNEL);
 	if (!scq->skb) {
 		dma_free_coherent(&card->pcidev->dev,
 				  2 * size, scq->org, scq->dma);
@@ -888,14 +889,10 @@ static scq_info *get_scq(ns_dev *card, int size, u32 scd)
 	scq->last = scq->base + (scq->num_entries - 1);
 	scq->tail = scq->last;
 	scq->scd = scd;
-	scq->num_entries = size / NS_SCQE_SIZE;
 	scq->tbd_count = 0;
 	init_waitqueue_head(&scq->scqfull_waitq);
 	scq->full = 0;
 	spin_lock_init(&scq->lock);
-
-	for (i = 0; i < scq->num_entries; i++)
-		scq->skb[i] = NULL;
 
 	return scq;
 }

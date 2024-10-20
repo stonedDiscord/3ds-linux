@@ -12,11 +12,12 @@ maintainers:
   - Yoshihiro Shimoda <yoshihiro.shimoda.uh@renesas.com>
 
 allOf:
-  - $ref: pci-bus.yaml#
+  - $ref: /schemas/pci/pci-host-bridge.yaml#
 
 properties:
   compatible:
     oneOf:
+      - const: renesas,pcie-r8a7779       # R-Car H1
       - items:
           - enum:
               - renesas,pcie-r8a7742      # RZ/G1H
@@ -67,6 +68,18 @@ properties:
   phy-names:
     const: pcie
 
+  vpcie1v5-supply:
+    description: The 1.5v regulator to use for PCIe.
+
+  vpcie3v3-supply:
+    description: The 3.3v regulator to use for PCIe.
+
+  vpcie12v-supply:
+    description: The 12v regulator to use for PCIe.
+
+  iommu-map: true
+  iommu-map-mask: true
+
 required:
   - compatible
   - reg
@@ -74,7 +87,16 @@ required:
   - clocks
   - clock-names
   - power-domains
-  - resets
+
+if:
+  not:
+    properties:
+      compatible:
+        contains:
+          const: renesas,pcie-r8a7779
+then:
+  required:
+    - resets
 
 unevaluatedProperties: false
 
@@ -111,5 +133,7 @@ examples:
              clock-names = "pcie", "pcie_bus";
              power-domains = <&sysc R8A7791_PD_ALWAYS_ON>;
              resets = <&cpg 319>;
+             vpcie3v3-supply = <&pcie_3v3>;
+             vpcie12v-supply = <&pcie_12v>;
          };
     };

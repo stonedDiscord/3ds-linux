@@ -4,7 +4,25 @@
 #ifndef __IPU3_CIO2_H
 #define __IPU3_CIO2_H
 
+#include <linux/bits.h>
+#include <linux/dma-mapping.h>
+#include <linux/kernel.h>
+#include <linux/mutex.h>
 #include <linux/types.h>
+
+#include <asm/page.h>
+
+#include <media/media-device.h>
+#include <media/media-entity.h>
+#include <media/v4l2-async.h>
+#include <media/v4l2-dev.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-subdev.h>
+#include <media/videobuf2-core.h>
+#include <media/videobuf2-v4l2.h>
+
+struct cio2_fbpt_entry;		/* defined here, after the first usage */
+struct pci_dev;
 
 #define CIO2_NAME					"ipu3-cio2"
 #define CIO2_DEVICE_NAME				"Intel IPU3 CIO2"
@@ -302,10 +320,6 @@
 #define CIO2_CSIRX_DLY_CNT_TERMEN_DEFAULT		0x4
 #define CIO2_CSIRX_DLY_CNT_SETTLE_DEFAULT		0x570
 
-#define CIO2_PMCSR_OFFSET				4U
-#define CIO2_PMCSR_D0D3_SHIFT				2U
-#define CIO2_PMCSR_D3					0x3
-
 struct cio2_csi2_timing {
 	s32 clk_termen;
 	s32 clk_settle;
@@ -319,6 +333,8 @@ struct cio2_buffer {
 	dma_addr_t lop_bus_addr[CIO2_MAX_LOPS];
 	unsigned int offset;
 };
+
+#define to_cio2_buffer(vb)	container_of(vb, struct cio2_buffer, vbb.vb2_buf)
 
 struct csi2_bus_info {
 	u32 port;
@@ -380,6 +396,8 @@ struct cio2_device {
 	/* DMA handle of dummy_lop */
 	dma_addr_t dummy_lop_bus_addr;
 };
+
+#define to_cio2_device(n)	container_of(n, struct cio2_device, notifier)
 
 /**************** Virtual channel ****************/
 /*

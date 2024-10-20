@@ -23,12 +23,7 @@ static const char * const sunxi_mbus_devices[] = {
 	"allwinner,sun7i-a20-display-engine",
 	"allwinner,sun8i-a23-display-engine",
 	"allwinner,sun8i-a33-display-engine",
-	"allwinner,sun8i-a83t-display-engine",
-	"allwinner,sun8i-h3-display-engine",
-	"allwinner,sun8i-r40-display-engine",
-	"allwinner,sun8i-v3s-display-engine",
 	"allwinner,sun9i-a80-display-engine",
-	"allwinner,sun50i-a64-display-engine",
 
 	/*
 	 * And now we have the regular devices connected to the MBUS
@@ -87,7 +82,7 @@ static int sunxi_mbus_notifier(struct notifier_block *nb,
 	 * Older DTs or SoCs who are not clearly understood need to set
 	 * that DMA offset though.
 	 */
-	if (of_find_property(dev->of_node, "interconnects", NULL))
+	if (of_property_present(dev->of_node, "interconnects"))
 		return NOTIFY_DONE;
 
 	ret = dma_direct_set_offset(dev, PHYS_OFFSET, 0, SZ_4G);

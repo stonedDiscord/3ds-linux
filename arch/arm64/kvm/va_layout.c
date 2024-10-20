@@ -34,17 +34,16 @@ static u64 __early_kern_hyp_va(u64 addr)
 }
 
 /*
- * Store a hyp VA <-> PA offset into a hyp-owned variable.
+ * Store a hyp VA <-> PA offset into a EL2-owned variable.
  */
 static void init_hyp_physvirt_offset(void)
 {
-	extern s64 kvm_nvhe_sym(hyp_physvirt_offset);
 	u64 kern_va, hyp_va;
 
 	/* Compute the offset from the hyp VA and PA of a random symbol. */
-	kern_va = (u64)kvm_ksym_ref(__hyp_text_start);
+	kern_va = (u64)lm_alias(__hyp_text_start);
 	hyp_va = __early_kern_hyp_va(kern_va);
-	CHOOSE_NVHE_SYM(hyp_physvirt_offset) = (s64)__pa(kern_va) - (s64)hyp_va;
+	hyp_physvirt_offset = (s64)__pa(kern_va) - (s64)hyp_va;
 }
 
 /*
@@ -80,6 +79,34 @@ __init void kvm_compute_layout(void)
 	tag_val >>= tag_lsb;
 
 	init_hyp_physvirt_offset();
+}
+
+/*
+ * The .hyp.reloc ELF section contains a list of kimg positions that
+ * contains kimg VAs but will be accessed only in hyp execution context.
+ * Convert them to hyp VAs. See gen-hyprel.c for more details.
+ */
+__init void kvm_apply_hyp_relocations(void)
+{
+	int32_t *rel;
+	int32_t *begin = (int32_t *)__hyp_reloc_begin;
+	int32_t *end = (int32_t *)__hyp_reloc_end;
+
+	for (rel = begin; rel < end; ++rel) {
+		uintptr_t *ptr, kimg_va;
+
+		/*
+		 * Each entry contains a 32-bit relative offset from itself
+		 * to a kimg VA position.
+		 */
+		ptr = (uintptr_t *)lm_alias((char *)rel + *rel);
+
+		/* Read the kimg VA value at the relocation address. */
+		kimg_va = *ptr;
+
+		/* Convert to hyp VA and store back to the relocation address. */
+		*ptr = __early_kern_hyp_va((uintptr_t)lm_alias(kimg_va));
+	}
 }
 
 static u32 compute_instruction(int n, u32 rd, u32 rn)
@@ -142,7 +169,7 @@ void __init kvm_update_va_mask(struct alt_instr *alt,
 		 * dictates it and we don't have any spare bits in the
 		 * address), NOP everything after masking the kernel VA.
 		 */
-		if (has_vhe() || (!tag_val && i > 0)) {
+		if (cpus_have_cap(ARM64_HAS_VIRT_HOST_EXTN) || (!tag_val && i > 0)) {
 			updptr[i] = cpu_to_le32(aarch64_insn_gen_nop());
 			continue;
 		}
@@ -166,7 +193,8 @@ void kvm_patch_vector_branch(struct alt_instr *alt,
 
 	BUG_ON(nr_inst != 4);
 
-	if (!cpus_have_const_cap(ARM64_SPECTRE_V3A) || WARN_ON_ONCE(has_vhe()))
+	if (!cpus_have_cap(ARM64_SPECTRE_V3A) ||
+	    WARN_ON_ONCE(cpus_have_cap(ARM64_HAS_VIRT_HOST_EXTN)))
 		return;
 
 	/*
@@ -256,14 +284,15 @@ static void generate_mov_q(u64 val, __le32 *origptr, __le32 *updptr, int nr_inst
 	*updptr++ = cpu_to_le32(insn);
 }
 
-void kvm_update_kimg_phys_offset(struct alt_instr *alt,
-				 __le32 *origptr, __le32 *updptr, int nr_inst)
-{
-	generate_mov_q(kimage_voffset + PHYS_OFFSET, origptr, updptr, nr_inst);
-}
-
 void kvm_get_kimage_voffset(struct alt_instr *alt,
 			    __le32 *origptr, __le32 *updptr, int nr_inst)
 {
 	generate_mov_q(kimage_voffset, origptr, updptr, nr_inst);
+}
+
+void kvm_compute_final_ctr_el0(struct alt_instr *alt,
+			       __le32 *origptr, __le32 *updptr, int nr_inst)
+{
+	generate_mov_q(read_sanitised_ftr_reg(SYS_CTR_EL0),
+		       origptr, updptr, nr_inst);
 }

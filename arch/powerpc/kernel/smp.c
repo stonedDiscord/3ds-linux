@@ -34,6 +34,8 @@
 #include <linux/random.h>
 #include <linux/stackprotector.h>
 #include <linux/pgtable.h>
+#include <linux/clockchips.h>
+#include <linux/kexec.h>
 
 #include <asm/ptrace.h>
 #include <linux/atomic.h>
@@ -42,10 +44,10 @@
 #include <asm/kvm_ppc.h>
 #include <asm/dbell.h>
 #include <asm/page.h>
-#include <asm/prom.h>
 #include <asm/smp.h>
 #include <asm/time.h>
 #include <asm/machdep.h>
+#include <asm/mmu_context.h>
 #include <asm/cputhreads.h>
 #include <asm/cputable.h>
 #include <asm/mpic.h>
@@ -55,11 +57,12 @@
 #endif
 #include <asm/vdso.h>
 #include <asm/debug.h>
-#include <asm/kexec.h>
-#include <asm/asm-prototypes.h>
 #include <asm/cpu_has_feature.h>
 #include <asm/ftrace.h>
 #include <asm/kup.h>
+#include <asm/fadump.h>
+
+#include <trace/events/ipi.h>
 
 #ifdef DEBUG
 #include <asm/udbg.h>
@@ -74,33 +77,25 @@ static DEFINE_PER_CPU(int, cpu_state) = { 0 };
 #endif
 
 struct task_struct *secondary_current;
-bool has_big_cores;
-bool coregroup_enabled;
-bool thread_group_shares_l2;
+bool has_big_cores __ro_after_init;
+bool coregroup_enabled __ro_after_init;
+bool thread_group_shares_l2 __ro_after_init;
+bool thread_group_shares_l3 __ro_after_init;
 
 DEFINE_PER_CPU(cpumask_var_t, cpu_sibling_map);
 DEFINE_PER_CPU(cpumask_var_t, cpu_smallcore_map);
 DEFINE_PER_CPU(cpumask_var_t, cpu_l2_cache_map);
 DEFINE_PER_CPU(cpumask_var_t, cpu_core_map);
-DEFINE_PER_CPU(cpumask_var_t, cpu_coregroup_map);
+static DEFINE_PER_CPU(cpumask_var_t, cpu_coregroup_map);
 
 EXPORT_PER_CPU_SYMBOL(cpu_sibling_map);
 EXPORT_PER_CPU_SYMBOL(cpu_l2_cache_map);
 EXPORT_PER_CPU_SYMBOL(cpu_core_map);
 EXPORT_SYMBOL_GPL(has_big_cores);
 
-enum {
-#ifdef CONFIG_SCHED_SMT
-	smt_idx,
-#endif
-	cache_idx,
-	mc_idx,
-	die_idx,
-};
-
 #define MAX_THREAD_LIST_SIZE	8
 #define THREAD_GROUP_SHARE_L1   1
-#define THREAD_GROUP_SHARE_L2   2
+#define THREAD_GROUP_SHARE_L2_L3 2
 struct thread_groups {
 	unsigned int property;
 	unsigned int nr_groups;
@@ -129,6 +124,12 @@ DEFINE_PER_CPU(cpumask_var_t, thread_group_l1_cache_map);
  * L2-cache.
  */
 DEFINE_PER_CPU(cpumask_var_t, thread_group_l2_cache_map);
+
+/*
+ * On P10, thread_group_l3_cache_map for each CPU is equal to the
+ * thread_group_l2_cache_map
+ */
+DEFINE_PER_CPU(cpumask_var_t, thread_group_l3_cache_map);
 
 /* SMP operations for this machine */
 struct smp_ops_t *smp_ops;
@@ -282,7 +283,7 @@ void smp_muxed_ipi_set_message(int cpu, int msg)
 	 * Order previous accesses before accesses in the IPI handler.
 	 */
 	smp_mb();
-	message[msg] = 1;
+	WRITE_ONCE(message[msg], 1);
 }
 
 void smp_muxed_ipi_message_pass(int cpu, int msg)
@@ -341,7 +342,7 @@ irqreturn_t smp_ipi_demux_relaxed(void)
 		if (all & IPI_MESSAGE(PPC_MSG_NMI_IPI))
 			nmi_ipi_action(0, NULL);
 #endif
-	} while (info->messages);
+	} while (READ_ONCE(info->messages));
 
 	return IRQ_HANDLED;
 }
@@ -357,12 +358,12 @@ static inline void do_message_pass(int cpu, int msg)
 #endif
 }
 
-void smp_send_reschedule(int cpu)
+void arch_smp_send_reschedule(int cpu)
 {
 	if (likely(smp_ops))
 		do_message_pass(cpu, PPC_MSG_RESCHEDULE);
 }
-EXPORT_SYMBOL_GPL(smp_send_reschedule);
+EXPORT_SYMBOL_GPL(arch_smp_send_reschedule);
 
 void arch_send_call_function_single_ipi(int cpu)
 {
@@ -404,32 +405,32 @@ static struct cpumask nmi_ipi_pending_mask;
 static bool nmi_ipi_busy = false;
 static void (*nmi_ipi_function)(struct pt_regs *) = NULL;
 
-static void nmi_ipi_lock_start(unsigned long *flags)
+noinstr static void nmi_ipi_lock_start(unsigned long *flags)
 {
 	raw_local_irq_save(*flags);
 	hard_irq_disable();
-	while (atomic_cmpxchg(&__nmi_ipi_lock, 0, 1) == 1) {
+	while (raw_atomic_cmpxchg(&__nmi_ipi_lock, 0, 1) == 1) {
 		raw_local_irq_restore(*flags);
-		spin_until_cond(atomic_read(&__nmi_ipi_lock) == 0);
+		spin_until_cond(raw_atomic_read(&__nmi_ipi_lock) == 0);
 		raw_local_irq_save(*flags);
 		hard_irq_disable();
 	}
 }
 
-static void nmi_ipi_lock(void)
+noinstr static void nmi_ipi_lock(void)
 {
-	while (atomic_cmpxchg(&__nmi_ipi_lock, 0, 1) == 1)
-		spin_until_cond(atomic_read(&__nmi_ipi_lock) == 0);
+	while (raw_atomic_cmpxchg(&__nmi_ipi_lock, 0, 1) == 1)
+		spin_until_cond(raw_atomic_read(&__nmi_ipi_lock) == 0);
 }
 
-static void nmi_ipi_unlock(void)
+noinstr static void nmi_ipi_unlock(void)
 {
 	smp_mb();
-	WARN_ON(atomic_read(&__nmi_ipi_lock) != 1);
-	atomic_set(&__nmi_ipi_lock, 0);
+	WARN_ON(raw_atomic_read(&__nmi_ipi_lock) != 1);
+	raw_atomic_set(&__nmi_ipi_lock, 0);
 }
 
-static void nmi_ipi_unlock_end(unsigned long *flags)
+noinstr static void nmi_ipi_unlock_end(unsigned long *flags)
 {
 	nmi_ipi_unlock();
 	raw_local_irq_restore(*flags);
@@ -438,7 +439,7 @@ static void nmi_ipi_unlock_end(unsigned long *flags)
 /*
  * Platform NMI handler calls this to ack
  */
-int smp_handle_nmi_ipi(struct pt_regs *regs)
+noinstr int smp_handle_nmi_ipi(struct pt_regs *regs)
 {
 	void (*fn)(struct pt_regs *) = NULL;
 	unsigned long flags;
@@ -576,7 +577,7 @@ void tick_broadcast(const struct cpumask *mask)
 #endif
 
 #ifdef CONFIG_DEBUGGER
-void debugger_ipi_callback(struct pt_regs *regs)
+static void debugger_ipi_callback(struct pt_regs *regs)
 {
 	debugger_ipi(regs);
 }
@@ -587,7 +588,7 @@ void smp_send_debugger_break(void)
 }
 #endif
 
-#ifdef CONFIG_KEXEC_CORE
+#ifdef CONFIG_CRASH_DUMP
 void crash_send_ipi(void (*crash_ipi_callback)(struct pt_regs *))
 {
 	int cpu;
@@ -612,12 +613,42 @@ void crash_send_ipi(void (*crash_ipi_callback)(struct pt_regs *))
 }
 #endif
 
+void crash_smp_send_stop(void)
+{
+	static bool stopped = false;
+
+	/*
+	 * In case of fadump, register data for all CPUs is captured by f/w
+	 * on ibm,os-term rtas call. Skip IPI callbacks to other CPUs before
+	 * this rtas call to avoid tricky post processing of those CPUs'
+	 * backtraces.
+	 */
+	if (should_fadump_crash())
+		return;
+
+	if (stopped)
+		return;
+
+	stopped = true;
+
+#ifdef CONFIG_CRASH_DUMP
+	if (kexec_crash_image) {
+		crash_kexec_prepare();
+		return;
+	}
+#endif
+
+	smp_send_stop();
+}
+
 #ifdef CONFIG_NMI_IPI
 static void nmi_stop_this_cpu(struct pt_regs *regs)
 {
 	/*
 	 * IRQs are already hard disabled by the smp_handle_nmi_ipi.
 	 */
+	set_cpu_online(smp_processor_id(), false);
+
 	spin_begin();
 	while (1)
 		spin_cpu_relax();
@@ -633,6 +664,15 @@ void smp_send_stop(void)
 static void stop_this_cpu(void *dummy)
 {
 	hard_irq_disable();
+
+	/*
+	 * Offlining CPUs in stop_this_cpu can result in scheduler warnings,
+	 * (see commit de6e5d38417e), but printk_safe_flush_on_panic() wants
+	 * to know other CPUs are offline before it breaks locks to flush
+	 * printk buffers, in case we panic()ed while holding the lock.
+	 */
+	set_cpu_online(smp_processor_id(), false);
+
 	spin_begin();
 	while (1)
 		spin_cpu_relax();
@@ -657,12 +697,12 @@ void smp_send_stop(void)
 }
 #endif /* CONFIG_NMI_IPI */
 
-struct task_struct *current_set[NR_CPUS];
+static struct task_struct *current_set[NR_CPUS];
 
 static void smp_store_cpu_info(int id)
 {
 	per_cpu(cpu_pvr, id) = mfspr(SPRN_PVR);
-#ifdef CONFIG_PPC_FSL_BOOK3E
+#ifdef CONFIG_PPC_E500
 	per_cpu(next_tlbcam_idx, id)
 		= (mfspr(SPRN_TLB1CFG) & TLBnCFG_N_ENTRY) - 1;
 #endif
@@ -817,7 +857,7 @@ out_free:
  * @tg : The thread-group structure of the CPU node which @cpu belongs
  *       to.
  *
- * Returns the index to tg->thread_list that points to the the start
+ * Returns the index to tg->thread_list that points to the start
  * of the thread_group that @cpu belongs to.
  *
  * Returns -1 if cpu doesn't belong to any of the groups pointed to by
@@ -877,33 +917,11 @@ out:
 	return tg;
 }
 
-static int __init init_thread_group_cache_map(int cpu, int cache_property)
-
+static int __init update_mask_from_threadgroup(cpumask_var_t *mask, struct thread_groups *tg,
+					       int cpu, int cpu_group_start)
 {
 	int first_thread = cpu_first_thread_sibling(cpu);
-	int i, cpu_group_start = -1, err = 0;
-	struct thread_groups *tg = NULL;
-	cpumask_var_t *mask = NULL;
-
-	if (cache_property != THREAD_GROUP_SHARE_L1 &&
-	    cache_property != THREAD_GROUP_SHARE_L2)
-		return -EINVAL;
-
-	tg = get_thread_groups(cpu, cache_property, &err);
-	if (!tg)
-		return err;
-
-	cpu_group_start = get_cpu_thread_group_start(cpu, tg);
-
-	if (unlikely(cpu_group_start == -1)) {
-		WARN_ON_ONCE(1);
-		return -ENODATA;
-	}
-
-	if (cache_property == THREAD_GROUP_SHARE_L1)
-		mask = &per_cpu(thread_group_l1_cache_map, cpu);
-	else if (cache_property == THREAD_GROUP_SHARE_L2)
-		mask = &per_cpu(thread_group_l2_cache_map, cpu);
+	int i;
 
 	zalloc_cpumask_var_node(mask, GFP_KERNEL, cpu_to_node(cpu));
 
@@ -922,13 +940,51 @@ static int __init init_thread_group_cache_map(int cpu, int cache_property)
 	return 0;
 }
 
-static bool shared_caches;
+static int __init init_thread_group_cache_map(int cpu, int cache_property)
+
+{
+	int cpu_group_start = -1, err = 0;
+	struct thread_groups *tg = NULL;
+	cpumask_var_t *mask = NULL;
+
+	if (cache_property != THREAD_GROUP_SHARE_L1 &&
+	    cache_property != THREAD_GROUP_SHARE_L2_L3)
+		return -EINVAL;
+
+	tg = get_thread_groups(cpu, cache_property, &err);
+
+	if (!tg)
+		return err;
+
+	cpu_group_start = get_cpu_thread_group_start(cpu, tg);
+
+	if (unlikely(cpu_group_start == -1)) {
+		WARN_ON_ONCE(1);
+		return -ENODATA;
+	}
+
+	if (cache_property == THREAD_GROUP_SHARE_L1) {
+		mask = &per_cpu(thread_group_l1_cache_map, cpu);
+		update_mask_from_threadgroup(mask, tg, cpu, cpu_group_start);
+	}
+	else if (cache_property == THREAD_GROUP_SHARE_L2_L3) {
+		mask = &per_cpu(thread_group_l2_cache_map, cpu);
+		update_mask_from_threadgroup(mask, tg, cpu, cpu_group_start);
+		mask = &per_cpu(thread_group_l3_cache_map, cpu);
+		update_mask_from_threadgroup(mask, tg, cpu, cpu_group_start);
+	}
+
+
+	return 0;
+}
+
+static bool shared_caches __ro_after_init;
 
 #ifdef CONFIG_SCHED_SMT
 /* cpumask of CPUs with asymmetric SMT dependency */
 static int powerpc_smt_flags(void)
 {
-	int flags = SD_SHARE_CPUCAPACITY | SD_SHARE_PKG_RESOURCES;
+	int flags = SD_SHARE_CPUCAPACITY | SD_SHARE_LLC;
 
 	if (cpu_has_feature(CPU_FTR_ASYM_SMT)) {
 		printk_once(KERN_INFO "Enabling Asymmetric SMT scheduling\n");
@@ -939,6 +995,13 @@ static int powerpc_smt_flags(void)
 #endif
 
 /*
+ * On shared processor LPARs scheduled on a big core (which has two or more
+ * independent thread groups per core), prefer lower numbered CPUs, so
+ * that workload consolidates to lesser number of cores.
+ */
+static __ro_after_init DEFINE_STATIC_KEY_FALSE(splpar_asym_pack);
+
+/*
  * P9 has a slightly odd architecture where pairs of cores share an L2 cache.
  * This topology makes it *much* cheaper to migrate tasks between adjacent cores
  * since the migrated task remains cache hot. We want to take advantage of this
@@ -946,7 +1009,18 @@ static int powerpc_smt_flags(void)
  */
 static int powerpc_shared_cache_flags(void)
 {
-	return SD_SHARE_PKG_RESOURCES;
+	if (static_branch_unlikely(&splpar_asym_pack))
+		return SD_SHARE_LLC | SD_ASYM_PACKING;
+
+	return SD_SHARE_LLC;
+}
+
+static int powerpc_shared_proc_flags(void)
+{
+	if (static_branch_unlikely(&splpar_asym_pack))
+		return SD_ASYM_PACKING;
+
+	return 0;
 }
 
 /*
@@ -972,6 +1046,10 @@ static struct cpumask *cpu_coregroup_mask(int cpu)
 
 static bool has_coregroup_support(void)
 {
+	/* Coregroup identification not available on shared systems */
+	if (is_shared_processor())
+		return 0;
+
 	return coregroup_enabled;
 }
 
@@ -979,16 +1057,6 @@ static const struct cpumask *cpu_mc_mask(int cpu)
 {
 	return cpu_coregroup_mask(cpu);
 }
-
-static struct sched_domain_topology_level powerpc_topology[] = {
-#ifdef CONFIG_SCHED_SMT
-	{ cpu_smt_mask, powerpc_smt_flags, SD_INIT_NAME(SMT) },
-#endif
-	{ shared_cache_mask, powerpc_shared_cache_flags, SD_INIT_NAME(CACHE) },
-	{ cpu_mc_mask, SD_INIT_NAME(MC) },
-	{ cpu_cpu_mask, SD_INIT_NAME(DIE) },
-	{ NULL, },
-};
 
 static int __init init_big_cores(void)
 {
@@ -1008,25 +1076,27 @@ static int __init init_big_cores(void)
 	has_big_cores = true;
 
 	for_each_possible_cpu(cpu) {
-		int err = init_thread_group_cache_map(cpu, THREAD_GROUP_SHARE_L2);
+		int err = init_thread_group_cache_map(cpu, THREAD_GROUP_SHARE_L2_L3);
 
 		if (err)
 			return err;
 	}
 
 	thread_group_shares_l2 = true;
-	pr_debug("L2 cache only shared by the threads in the small core\n");
+	thread_group_shares_l3 = true;
+	pr_debug("L2/L3 cache only shared by the threads in the small core\n");
+
 	return 0;
 }
 
 void __init smp_prepare_cpus(unsigned int max_cpus)
 {
-	unsigned int cpu;
+	unsigned int cpu, num_threads;
 
 	DBG("smp_prepare_cpus\n");
 
 	/* 
-	 * setup_cpu may need to be called on the boot cpu. We havent
+	 * setup_cpu may need to be called on the boot cpu. We haven't
 	 * spun any cpus up but lets be paranoid.
 	 */
 	BUG_ON(boot_cpuid != smp_processor_id());
@@ -1046,7 +1116,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 			zalloc_cpumask_var_node(&per_cpu(cpu_coregroup_map, cpu),
 						GFP_KERNEL, cpu_to_node(cpu));
 
-#ifdef CONFIG_NEED_MULTIPLE_NODES
+#ifdef CONFIG_NUMA
 		/*
 		 * numa_node_id() works after this.
 		 */
@@ -1056,17 +1126,12 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 				local_memory_node(numa_cpu_lookup_table[cpu]));
 		}
 #endif
-		/*
-		 * cpu_core_map is now more updated and exists only since
-		 * its been exported for long. It only will have a snapshot
-		 * of cpu_cpu_mask.
-		 */
-		cpumask_copy(per_cpu(cpu_core_map, cpu), cpu_cpu_mask(cpu));
 	}
 
 	/* Init the cpumasks so the boot CPU is related to itself */
 	cpumask_set_cpu(boot_cpuid, cpu_sibling_mask(boot_cpuid));
 	cpumask_set_cpu(boot_cpuid, cpu_l2_cache_mask(boot_cpuid));
+	cpumask_set_cpu(boot_cpuid, cpu_core_mask(boot_cpuid));
 
 	if (has_coregroup_support())
 		cpumask_set_cpu(boot_cpuid, cpu_coregroup_mask(boot_cpuid));
@@ -1077,11 +1142,31 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 				cpu_smallcore_mask(boot_cpuid));
 	}
 
+	if (cpu_to_chip_id(boot_cpuid) != -1) {
+		int idx = DIV_ROUND_UP(num_possible_cpus(), threads_per_core);
+
+		/*
+		 * All threads of a core will all belong to the same core,
+		 * chip_id_lookup_table will have one entry per core.
+		 * Assumption: if boot_cpuid doesn't have a chip-id, then no
+		 * other CPUs, will also not have chip-id.
+		 */
+		chip_id_lookup_table = kcalloc(idx, sizeof(int), GFP_KERNEL);
+		if (chip_id_lookup_table)
+			memset(chip_id_lookup_table, -1, sizeof(int) * idx);
+	}
+
 	if (smp_ops && smp_ops->probe)
 		smp_ops->probe();
+
+	// Initalise the generic SMT topology support
+	num_threads = 1;
+	if (smt_enabled_at_boot)
+		num_threads = smt_enabled_at_boot;
+	cpu_smt_set_num_threads(num_threads, threads_per_core);
 }
 
-void smp_prepare_boot_cpu(void)
+void __init smp_prepare_boot_cpu(void)
 {
 	BUG_ON(smp_processor_id() != boot_cpuid);
 #ifdef CONFIG_PPC64
@@ -1176,15 +1261,20 @@ static void cpu_idle_thread_init(unsigned int cpu, struct task_struct *idle)
 #ifdef CONFIG_PPC64
 	paca_ptrs[cpu]->__current = idle;
 	paca_ptrs[cpu]->kstack = (unsigned long)task_stack_page(idle) +
-				 THREAD_SIZE - STACK_FRAME_OVERHEAD;
+				 THREAD_SIZE - STACK_FRAME_MIN_SIZE;
 #endif
-	idle->cpu = cpu;
+	task_thread_info(idle)->cpu = cpu;
 	secondary_current = current_set[cpu] = idle;
 }
 
 int __cpu_up(unsigned int cpu, struct task_struct *tidle)
 {
-	int rc, c;
+	const unsigned long boot_spin_ms = 5 * MSEC_PER_SEC;
+	const bool booting = system_state < SYSTEM_RUNNING;
+	const unsigned long hp_spin_ms = 1;
+	unsigned long deadline;
+	int rc;
+	const unsigned long spin_wait_ms = booting ? boot_spin_ms : hp_spin_ms;
 
 	/*
 	 * Don't allow secondary threads to come online if inhibited
@@ -1229,22 +1319,23 @@ int __cpu_up(unsigned int cpu, struct task_struct *tidle)
 	}
 
 	/*
-	 * wait to see if the cpu made a callin (is actually up).
-	 * use this value that I found through experimentation.
-	 * -- Cort
+	 * At boot time, simply spin on the callin word until the
+	 * deadline passes.
+	 *
+	 * At run time, spin for an optimistic amount of time to avoid
+	 * sleeping in the common case.
 	 */
-	if (system_state < SYSTEM_RUNNING)
-		for (c = 50000; c && !cpu_callin_map[cpu]; c--)
-			udelay(100);
-#ifdef CONFIG_HOTPLUG_CPU
-	else
-		/*
-		 * CPUs can take much longer to come up in the
-		 * hotplug case.  Wait five seconds.
-		 */
-		for (c = 5000; c && !cpu_callin_map[cpu]; c--)
-			msleep(1);
-#endif
+	deadline = jiffies + msecs_to_jiffies(spin_wait_ms);
+	spin_until_cond(cpu_callin_map[cpu] || time_is_before_jiffies(deadline));
+
+	if (!cpu_callin_map[cpu] && system_state >= SYSTEM_RUNNING) {
+		const unsigned long sleep_interval_us = 10 * USEC_PER_MSEC;
+		const unsigned long sleep_wait_ms = 100 * MSEC_PER_SEC;
+
+		deadline = jiffies + msecs_to_jiffies(sleep_wait_ms);
+		while (!cpu_callin_map[cpu] && time_is_after_jiffies(deadline))
+			fsleep(sleep_interval_us);
+	}
 
 	if (!cpu_callin_map[cpu]) {
 		printk(KERN_ERR "Processor %u is stuck.\n", cpu);
@@ -1268,18 +1359,13 @@ int __cpu_up(unsigned int cpu, struct task_struct *tidle)
 int cpu_to_core_id(int cpu)
 {
 	struct device_node *np;
-	const __be32 *reg;
 	int id = -1;
 
 	np = of_get_cpu_node(cpu, NULL);
 	if (!np)
 		goto out;
 
-	reg = of_get_property(np, "reg", NULL);
-	if (!reg)
-		goto out;
-
-	id = be32_to_cpup(reg);
+	id = of_get_cpu_hwid(np, 0);
 out:
 	of_node_put(np);
 	return id;
@@ -1355,7 +1441,7 @@ static bool update_mask_by_l2(int cpu, cpumask_var_t *mask)
 	l2_cache = cpu_to_l2cache(cpu);
 	if (!l2_cache || !*mask) {
 		/* Assume only core siblings share cache with this CPU */
-		for_each_cpu(i, submask_fn(cpu))
+		for_each_cpu(i, cpu_sibling_mask(cpu))
 			set_cpus_related(cpu, i, cpu_l2_cache_mask);
 
 		return false;
@@ -1397,6 +1483,8 @@ static void remove_cpu_from_masks(int cpu)
 	struct cpumask *(*mask_fn)(int) = cpu_sibling_mask;
 	int i;
 
+	unmap_cpu_from_node(cpu);
+
 	if (shared_caches)
 		mask_fn = cpu_l2_cache_mask;
 
@@ -1406,6 +1494,9 @@ static void remove_cpu_from_masks(int cpu)
 		if (has_big_cores)
 			set_cpus_unrelated(cpu, i, cpu_smallcore_mask);
 	}
+
+	for_each_cpu(i, cpu_core_mask(cpu))
+		set_cpus_unrelated(cpu, i, cpu_core_mask);
 
 	if (has_coregroup_support()) {
 		for_each_cpu(i, cpu_coregroup_mask(cpu))
@@ -1467,15 +1558,20 @@ static void update_coregroup_mask(int cpu, cpumask_var_t *mask)
 
 static void add_cpu_to_masks(int cpu)
 {
+	struct cpumask *(*submask_fn)(int) = cpu_sibling_mask;
 	int first_thread = cpu_first_thread_sibling(cpu);
 	cpumask_var_t mask;
+	int chip_id = -1;
+	bool ret;
 	int i;
 
 	/*
 	 * This CPU will not be in the online mask yet so we need to manually
-	 * add it to it's own thread sibling mask.
+	 * add it to its own thread sibling mask.
 	 */
+	map_cpu_to_node(cpu, cpu_to_node(cpu));
 	cpumask_set_cpu(cpu, cpu_sibling_mask(cpu));
+	cpumask_set_cpu(cpu, cpu_core_mask(cpu));
 
 	for (i = first_thread; i < first_thread + threads_per_core; i++)
 		if (cpu_online(i))
@@ -1484,27 +1580,59 @@ static void add_cpu_to_masks(int cpu)
 	add_cpu_to_smallcore_masks(cpu);
 
 	/* In CPU-hotplug path, hence use GFP_ATOMIC */
-	alloc_cpumask_var_node(&mask, GFP_ATOMIC, cpu_to_node(cpu));
+	ret = alloc_cpumask_var_node(&mask, GFP_ATOMIC, cpu_to_node(cpu));
 	update_mask_by_l2(cpu, &mask);
 
 	if (has_coregroup_support())
 		update_coregroup_mask(cpu, &mask);
 
+	if (chip_id_lookup_table && ret)
+		chip_id = cpu_to_chip_id(cpu);
+
+	if (shared_caches)
+		submask_fn = cpu_l2_cache_mask;
+
+	/* Update core_mask with all the CPUs that are part of submask */
+	or_cpumasks_related(cpu, cpu, submask_fn, cpu_core_mask);
+
+	/* Skip all CPUs already part of current CPU core mask */
+	cpumask_andnot(mask, cpu_online_mask, cpu_core_mask(cpu));
+
+	/* If chip_id is -1; limit the cpu_core_mask to within PKG */
+	if (chip_id == -1)
+		cpumask_and(mask, mask, cpu_cpu_mask(cpu));
+
+	for_each_cpu(i, mask) {
+		if (chip_id == cpu_to_chip_id(i)) {
+			or_cpumasks_related(cpu, i, submask_fn, cpu_core_mask);
+			cpumask_andnot(mask, mask, submask_fn(i));
+		} else {
+			cpumask_andnot(mask, mask, cpu_core_mask(i));
+		}
+	}
+
 	free_cpumask_var(mask);
 }
 
 /* Activate a secondary processor. */
+__no_stack_protector
 void start_secondary(void *unused)
 {
 	unsigned int cpu = raw_smp_processor_id();
 
-	mmgrab(&init_mm);
+	/* PPC64 calls setup_kup() in early_setup_secondary() */
+	if (IS_ENABLED(CONFIG_PPC32))
+		setup_kup();
+
+	mmgrab_lazy_tlb(&init_mm);
 	current->active_mm = &init_mm;
+	VM_WARN_ON(cpumask_test_cpu(smp_processor_id(), mm_cpumask(&init_mm)));
+	cpumask_set_cpu(cpu, mm_cpumask(&init_mm));
+	inc_mm_active_cpus(&init_mm);
 
 	smp_store_cpu_info(cpu);
 	set_dec(tb_ticks_per_jiffy);
-	rcu_cpu_starting(cpu);
-	preempt_disable();
+	rcutree_report_cpu_starting(cpu);
 	cpu_callin_map[cpu] = 1;
 
 	if (smp_ops->setup_cpu)
@@ -1520,6 +1648,9 @@ void start_secondary(void *unused)
 
 	vdso_getcpu_init();
 #endif
+	set_numa_node(numa_cpu_lookup_table[cpu]);
+	set_numa_mem(local_memory_node(numa_cpu_lookup_table[cpu]));
+
 	/* Update topology CPU masks */
 	add_cpu_to_masks(cpu);
 
@@ -1538,9 +1669,6 @@ void start_secondary(void *unused)
 			shared_caches = true;
 	}
 
-	set_numa_node(numa_cpu_lookup_table[cpu]);
-	set_numa_mem(local_memory_node(numa_cpu_lookup_table[cpu]));
-
 	smp_wmb();
 	notify_cpu_starting(cpu);
 	set_cpu_online(cpu, true);
@@ -1557,48 +1685,45 @@ void start_secondary(void *unused)
 	BUG();
 }
 
-int setup_profiling_timer(unsigned int multiplier)
-{
-	return 0;
-}
+static struct sched_domain_topology_level powerpc_topology[6];
 
-static void fixup_topology(void)
+static void __init build_sched_topology(void)
 {
-	int i;
+	int i = 0;
+
+	if (is_shared_processor() && has_big_cores)
+		static_branch_enable(&splpar_asym_pack);
 
 #ifdef CONFIG_SCHED_SMT
 	if (has_big_cores) {
 		pr_info("Big cores detected but using small core scheduling\n");
-		powerpc_topology[smt_idx].mask = smallcore_smt_mask;
+		powerpc_topology[i++] = (struct sched_domain_topology_level){
+			smallcore_smt_mask, powerpc_smt_flags, SD_INIT_NAME(SMT)
+		};
+	} else {
+		powerpc_topology[i++] = (struct sched_domain_topology_level){
+			cpu_smt_mask, powerpc_smt_flags, SD_INIT_NAME(SMT)
+		};
 	}
 #endif
-
-	if (!has_coregroup_support())
-		powerpc_topology[mc_idx].mask = powerpc_topology[cache_idx].mask;
-
-	/*
-	 * Try to consolidate topology levels here instead of
-	 * allowing scheduler to degenerate.
-	 * - Dont consolidate if masks are different.
-	 * - Dont consolidate if sd_flags exists and are different.
-	 */
-	for (i = 1; i <= die_idx; i++) {
-		if (powerpc_topology[i].mask != powerpc_topology[i - 1].mask)
-			continue;
-
-		if (powerpc_topology[i].sd_flags && powerpc_topology[i - 1].sd_flags &&
-				powerpc_topology[i].sd_flags != powerpc_topology[i - 1].sd_flags)
-			continue;
-
-		if (!powerpc_topology[i - 1].sd_flags)
-			powerpc_topology[i - 1].sd_flags = powerpc_topology[i].sd_flags;
-
-		powerpc_topology[i].mask = powerpc_topology[i + 1].mask;
-		powerpc_topology[i].sd_flags = powerpc_topology[i + 1].sd_flags;
-#ifdef CONFIG_SCHED_DEBUG
-		powerpc_topology[i].name = powerpc_topology[i + 1].name;
-#endif
+	if (shared_caches) {
+		powerpc_topology[i++] = (struct sched_domain_topology_level){
+			shared_cache_mask, powerpc_shared_cache_flags, SD_INIT_NAME(CACHE)
+		};
 	}
+	if (has_coregroup_support()) {
+		powerpc_topology[i++] = (struct sched_domain_topology_level){
+			cpu_mc_mask, powerpc_shared_proc_flags, SD_INIT_NAME(MC)
+		};
+	}
+	powerpc_topology[i++] = (struct sched_domain_topology_level){
+		cpu_cpu_mask, powerpc_shared_proc_flags, SD_INIT_NAME(PKG)
+	};
+
+	/* There must be one trailing NULL entry left.  */
+	BUG_ON(i >= ARRAY_SIZE(powerpc_topology) - 1);
+
+	set_sched_topology(powerpc_topology);
 }
 
 void __init smp_cpus_done(unsigned int max_cpus)
@@ -1613,9 +1738,20 @@ void __init smp_cpus_done(unsigned int max_cpus)
 		smp_ops->bringup_done();
 
 	dump_numa_cpu_topology();
+	build_sched_topology();
+}
 
-	fixup_topology();
-	set_sched_topology(powerpc_topology);
+/*
+ * For asym packing, by default lower numbered CPU has higher priority.
+ * On shared processors, pack to lower numbered core. However avoid moving
+ * between thread_groups within the same core.
+ */
+int arch_asym_cpu_priority(int cpu)
+{
+	if (static_branch_unlikely(&splpar_asym_pack))
+		return -cpu / threads_per_core;
+
+	return -cpu;
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -1641,14 +1777,20 @@ int __cpu_disable(void)
 
 void __cpu_die(unsigned int cpu)
 {
+	/*
+	 * This could perhaps be a generic call in idlea_task_dead(), but
+	 * that requires testing from all archs, so first put it here to
+	 */
+	VM_WARN_ON_ONCE(!cpumask_test_cpu(cpu, mm_cpumask(&init_mm)));
+	dec_mm_active_cpus(&init_mm);
+	cpumask_clear_cpu(cpu, mm_cpumask(&init_mm));
+
 	if (smp_ops->cpu_die)
 		smp_ops->cpu_die(cpu);
 }
 
-void arch_cpu_idle_dead(void)
+void __noreturn arch_cpu_idle_dead(void)
 {
-	sched_preempt_enable_no_resched();
-
 	/*
 	 * Disable on the down path. This will be re-enabled by
 	 * start_secondary() via start_secondary_resume() below

@@ -34,11 +34,9 @@
 #include "r600_reg_safe.h"
 
 static int r600_nomm;
-extern void r600_cs_legacy_get_tiling_conf(struct drm_device *dev, u32 *npipes, u32 *nbanks, u32 *group_size);
-
 
 struct r600_cs_track {
-	/* configuration we miror so that we use same code btw kms/ums */
+	/* configuration we mirror so that we use same code btw kms/ums */
 	u32			group_size;
 	u32			nbanks;
 	u32			npipes;
@@ -220,7 +218,7 @@ int r600_fmt_get_nblocksx(u32 format, u32 w)
 	if (bw == 0)
 		return 0;
 
-	return (w + bw - 1) / bw;
+	return DIV_ROUND_UP(w, bw);
 }
 
 int r600_fmt_get_nblocksy(u32 format, u32 h)
@@ -234,7 +232,7 @@ int r600_fmt_get_nblocksy(u32 format, u32 h)
 	if (bh == 0)
 		return 0;
 
-	return (h + bh - 1) / bh;
+	return DIV_ROUND_UP(h, bh);
 }
 
 struct array_mode_checker {
@@ -886,7 +884,7 @@ int r600_cs_common_vline_parse(struct radeon_cs_parser *p,
 	crtc_id = radeon_get_ib_value(p, h_idx + 2 + 7 + 1);
 	reg = R600_CP_PACKET0_GET_REG(header);
 
-	crtc = drm_crtc_find(p->rdev->ddev, p->filp, crtc_id);
+	crtc = drm_crtc_find(rdev_to_drm(p->rdev), p->filp, crtc_id);
 	if (!crtc) {
 		DRM_ERROR("cannot find crtc %d\n", crtc_id);
 		return -ENOENT;
@@ -963,7 +961,7 @@ static int r600_cs_parse_packet0(struct radeon_cs_parser *p,
  *
  * This function will test against r600_reg_safe_bm and return 0
  * if register is safe. If register is not flag as safe this function
- * will test it against a list of register needind special handling.
+ * will test it against a list of register needing special handling.
  */
 static int r600_cs_check_reg(struct radeon_cs_parser *p, u32 reg, u32 idx)
 {
@@ -1277,7 +1275,7 @@ static int r600_cs_check_reg(struct radeon_cs_parser *p, u32 reg, u32 idx)
 			return -EINVAL;
 		}
 		tmp = (reg - CB_COLOR0_BASE) / 4;
-		track->cb_color_bo_offset[tmp] = radeon_get_ib_value(p, idx) << 8;
+		track->cb_color_bo_offset[tmp] = (u64)radeon_get_ib_value(p, idx) << 8;
 		ib[idx] += (u32)((reloc->gpu_offset >> 8) & 0xffffffff);
 		track->cb_color_base_last[tmp] = ib[idx];
 		track->cb_color_bo[tmp] = reloc->robj;
@@ -1304,7 +1302,7 @@ static int r600_cs_check_reg(struct radeon_cs_parser *p, u32 reg, u32 idx)
 					"0x%04X\n", reg);
 			return -EINVAL;
 		}
-		track->htile_offset = radeon_get_ib_value(p, idx) << 8;
+		track->htile_offset = (u64)radeon_get_ib_value(p, idx) << 8;
 		ib[idx] += (u32)((reloc->gpu_offset >> 8) & 0xffffffff);
 		track->htile_bo = reloc->robj;
 		track->db_dirty = true;
@@ -2336,7 +2334,7 @@ int r600_cs_parse(struct radeon_cs_parser *p)
 /**
  * r600_dma_cs_next_reloc() - parse next reloc
  * @p:		parser structure holding parsing context.
- * @cs_reloc:		reloc informations
+ * @cs_reloc:		reloc information
  *
  * Return the next reloc, do bo validation and compute
  * GPU offset using the provided start.

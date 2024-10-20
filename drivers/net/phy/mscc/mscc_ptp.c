@@ -15,7 +15,7 @@
 #include <linux/ptp_classify.h>
 #include <linux/ptp_clock_kernel.h>
 #include <linux/udp.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "mscc.h"
 #include "mscc_ptp.h"
@@ -506,7 +506,7 @@ static int vsc85xx_ptp_cmp_init(struct phy_device *phydev, enum ts_blk blk)
 {
 	struct vsc8531_private *vsc8531 = phydev->priv;
 	bool base = phydev->mdio.addr == vsc8531->ts_base_addr;
-	u8 msgs[] = {
+	static const u8 msgs[] = {
 		PTP_MSGTYPE_SYNC,
 		PTP_MSGTYPE_DELAY_REQ
 	};
@@ -847,7 +847,7 @@ static int vsc85xx_ts_ptp_action_flow(struct phy_device *phydev, enum ts_blk blk
 static int vsc85xx_ptp_conf(struct phy_device *phydev, enum ts_blk blk,
 			    bool one_step, bool enable)
 {
-	u8 msgs[] = {
+	static const u8 msgs[] = {
 		PTP_MSGTYPE_SYNC,
 		PTP_MSGTYPE_DELAY_REQ
 	};
@@ -1045,22 +1045,17 @@ static void vsc85xx_ts_reset_fifo(struct phy_device *phydev)
 			     val);
 }
 
-static int vsc85xx_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
+static int vsc85xx_hwtstamp(struct mii_timestamper *mii_ts,
+			    struct kernel_hwtstamp_config *cfg,
+			    struct netlink_ext_ack *extack)
 {
 	struct vsc8531_private *vsc8531 =
 		container_of(mii_ts, struct vsc8531_private, mii_ts);
 	struct phy_device *phydev = vsc8531->ptp->phydev;
-	struct hwtstamp_config cfg;
 	bool one_step = false;
 	u32 val;
 
-	if (copy_from_user(&cfg, ifr->ifr_data, sizeof(cfg)))
-		return -EFAULT;
-
-	if (cfg.flags)
-		return -EINVAL;
-
-	switch (cfg.tx_type) {
+	switch (cfg->tx_type) {
 	case HWTSTAMP_TX_ONESTEP_SYNC:
 		one_step = true;
 		break;
@@ -1072,9 +1067,9 @@ static int vsc85xx_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
 		return -ERANGE;
 	}
 
-	vsc8531->ptp->tx_type = cfg.tx_type;
+	vsc8531->ptp->tx_type = cfg->tx_type;
 
-	switch (cfg.rx_filter) {
+	switch (cfg->rx_filter) {
 	case HWTSTAMP_FILTER_NONE:
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
@@ -1087,7 +1082,7 @@ static int vsc85xx_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
 		return -ERANGE;
 	}
 
-	vsc8531->ptp->rx_filter = cfg.rx_filter;
+	vsc8531->ptp->rx_filter = cfg->rx_filter;
 
 	mutex_lock(&vsc8531->ts_lock);
 
@@ -1135,11 +1130,11 @@ static int vsc85xx_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
 	vsc8531->ptp->configured = 1;
 	mutex_unlock(&vsc8531->ts_lock);
 
-	return copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)) ? -EFAULT : 0;
+	return 0;
 }
 
 static int vsc85xx_ts_info(struct mii_timestamper *mii_ts,
-			   struct ethtool_ts_info *info)
+			   struct kernel_ethtool_ts_info *info)
 {
 	struct vsc8531_private *vsc8531 =
 		container_of(mii_ts, struct vsc8531_private, mii_ts);
@@ -1215,7 +1210,7 @@ static bool vsc85xx_rxtstamp(struct mii_timestamper *mii_ts,
 		ts.tv_sec--;
 
 	shhwtstamps->hwtstamp = ktime_set(ts.tv_sec, ns);
-	netif_rx_ni(skb);
+	netif_rx(skb);
 
 	return true;
 }
@@ -1268,8 +1263,8 @@ static void vsc8584_set_input_clk_configured(struct phy_device *phydev)
 static int __vsc8584_init_ptp(struct phy_device *phydev)
 {
 	struct vsc8531_private *vsc8531 = phydev->priv;
-	u32 ltc_seq_e[] = { 0, 400000, 0, 0, 0 };
-	u8  ltc_seq_a[] = { 8, 6, 5, 4, 2 };
+	static const u32 ltc_seq_e[] = { 0, 400000, 0, 0, 0 };
+	static const u8  ltc_seq_a[] = { 8, 6, 5, 4, 2 };
 	u32 val;
 
 	if (!vsc8584_is_1588_input_clk_configured(phydev)) {
@@ -1574,6 +1569,9 @@ int vsc8584_ptp_probe(struct phy_device *phydev)
 			   PTR_ERR(vsc8531->load_save));
 		return PTR_ERR(vsc8531->load_save);
 	}
+
+	/* Timestamp selected by default to keep legacy API */
+	phydev->default_timestamp = true;
 
 	vsc8531->ptp->phydev = phydev;
 

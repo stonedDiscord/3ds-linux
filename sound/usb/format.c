@@ -39,8 +39,12 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 	case UAC_VERSION_1:
 	default: {
 		struct uac_format_type_i_discrete_descriptor *fmt = _fmt;
-		if (format >= 64)
-			return 0; /* invalid format */
+		if (format >= 64) {
+			usb_audio_info(chip,
+				       "%u:%d: invalid format type 0x%llx is detected, processed as PCM\n",
+				       fp->iface, fp->altsetting, format);
+			format = UAC_FORMAT_TYPE_I_PCM;
+		}
 		sample_width = fmt->bBitResolution;
 		sample_bytes = fmt->bSubframeSize;
 		format = 1ULL << format;
@@ -78,13 +82,13 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 	fp->fmt_bits = sample_width;
 
 	if ((pcm_formats == 0) &&
-	    (format == 0 || format == (1 << UAC_FORMAT_TYPE_I_UNDEFINED))) {
+	    (format == 0 || format == BIT(UAC_FORMAT_TYPE_I_UNDEFINED))) {
 		/* some devices don't define this correctly... */
 		usb_audio_info(chip, "%u:%d : format type 0 is detected, processed as PCM\n",
 			fp->iface, fp->altsetting);
-		format = 1 << UAC_FORMAT_TYPE_I_PCM;
+		format = BIT(UAC_FORMAT_TYPE_I_PCM);
 	}
-	if (format & (1 << UAC_FORMAT_TYPE_I_PCM)) {
+	if (format & BIT(UAC_FORMAT_TYPE_I_PCM)) {
 		if (((chip->usb_id == USB_ID(0x0582, 0x0016)) ||
 		     /* Edirol SD-90 */
 		     (chip->usb_id == USB_ID(0x0582, 0x000c))) &&
@@ -124,7 +128,7 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 			break;
 		}
 	}
-	if (format & (1 << UAC_FORMAT_TYPE_I_PCM8)) {
+	if (format & BIT(UAC_FORMAT_TYPE_I_PCM8)) {
 		/* Dallas DS4201 workaround: it advertises U8 format, but really
 		   supports S8. */
 		if (chip->usb_id == USB_ID(0x04fa, 0x4201))
@@ -132,15 +136,12 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 		else
 			pcm_formats |= SNDRV_PCM_FMTBIT_U8;
 	}
-	if (format & (1 << UAC_FORMAT_TYPE_I_IEEE_FLOAT)) {
+	if (format & BIT(UAC_FORMAT_TYPE_I_IEEE_FLOAT))
 		pcm_formats |= SNDRV_PCM_FMTBIT_FLOAT_LE;
-	}
-	if (format & (1 << UAC_FORMAT_TYPE_I_ALAW)) {
+	if (format & BIT(UAC_FORMAT_TYPE_I_ALAW))
 		pcm_formats |= SNDRV_PCM_FMTBIT_A_LAW;
-	}
-	if (format & (1 << UAC_FORMAT_TYPE_I_MULAW)) {
+	if (format & BIT(UAC_FORMAT_TYPE_I_MULAW))
 		pcm_formats |= SNDRV_PCM_FMTBIT_MU_LAW;
-	}
 	if (format & ~0x3f) {
 		usb_audio_info(chip,
 			 "%u:%d : unsupported format bits %#llx\n",
@@ -223,9 +224,11 @@ static int parse_audio_format_rates_v1(struct snd_usb_audio *chip, struct audiof
 				continue;
 			/* C-Media CM6501 mislabels its 96 kHz altsetting */
 			/* Terratec Aureon 7.1 USB C-Media 6206, too */
+			/* Ozone Z90 USB C-Media, too */
 			if (rate == 48000 && nr_rates == 1 &&
 			    (chip->usb_id == USB_ID(0x0d8c, 0x0201) ||
 			     chip->usb_id == USB_ID(0x0d8c, 0x0102) ||
+			     chip->usb_id == USB_ID(0x0d8c, 0x0078) ||
 			     chip->usb_id == USB_ID(0x0ccd, 0x00b1)) &&
 			    fp->altsetting == 5 && fp->maxpacksize == 392)
 				rate = 96000;
@@ -373,7 +376,7 @@ static int parse_uac2_sample_rate_range(struct snd_usb_audio *chip,
 		for (rate = min; rate <= max; rate += res) {
 
 			/* Filter out invalid rates on Presonus Studio 1810c */
-			if (chip->usb_id == USB_ID(0x0194f, 0x010c) &&
+			if (chip->usb_id == USB_ID(0x194f, 0x010c) &&
 			    !s1810c_valid_sample_rate(fp, rate))
 				goto skip_rate;
 
@@ -412,10 +415,12 @@ static int line6_parse_audio_format_rates_quirk(struct snd_usb_audio *chip,
 	case USB_ID(0x0e41, 0x4242): /* Line6 Helix Rack */
 	case USB_ID(0x0e41, 0x4244): /* Line6 Helix LT */
 	case USB_ID(0x0e41, 0x4246): /* Line6 HX-Stomp */
+	case USB_ID(0x0e41, 0x4253): /* Line6 HX-Stomp XL */
 	case USB_ID(0x0e41, 0x4247): /* Line6 Pod Go */
 	case USB_ID(0x0e41, 0x4248): /* Line6 Helix >= fw 2.82 */
 	case USB_ID(0x0e41, 0x4249): /* Line6 Helix Rack >= fw 2.82 */
 	case USB_ID(0x0e41, 0x424a): /* Line6 Helix LT >= fw 2.82 */
+	case USB_ID(0x0e41, 0x424b): /* Line6 Pod Go */
 	case USB_ID(0x19f7, 0x0011): /* Rode Rodecaster Pro */
 		return set_fixed_rate(fp, 48000, SNDRV_PCM_RATE_48000);
 	}
@@ -436,7 +441,7 @@ static bool check_valid_altsetting_v2v3(struct snd_usb_audio *chip, int iface,
 	if (snd_BUG_ON(altsetting >= 64 - 8))
 		return false;
 
-	err = snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0), UAC2_CS_CUR,
+	err = snd_usb_ctl_msg(dev, usb_rcvctrlpipe(dev, 0), UAC2_CS_CUR,
 			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_IN,
 			      UAC2_AS_VAL_ALT_SETTINGS << 8,
 			      iface, &raw_data, sizeof(raw_data));
@@ -462,9 +467,36 @@ static int validate_sample_rate_table_v2v3(struct snd_usb_audio *chip,
 					   int clock)
 {
 	struct usb_device *dev = chip->dev;
+	struct usb_host_interface *alts;
 	unsigned int *table;
 	unsigned int nr_rates;
 	int i, err;
+	u32 bmControls;
+
+	/* performing the rate verification may lead to unexpected USB bus
+	 * behavior afterwards by some unknown reason.  Do this only for the
+	 * known devices.
+	 */
+	if (!(chip->quirk_flags & QUIRK_FLAG_VALIDATE_RATES))
+		return 0; /* don't perform the validation as default */
+
+	alts = snd_usb_get_host_interface(chip, fp->iface, fp->altsetting);
+	if (!alts)
+		return 0;
+
+	if (fp->protocol == UAC_VERSION_3) {
+		struct uac3_as_header_descriptor *as = snd_usb_find_csint_desc(
+				alts->extra, alts->extralen, NULL, UAC_AS_GENERAL);
+		bmControls = le32_to_cpu(as->bmControls);
+	} else {
+		struct uac2_as_header_descriptor *as = snd_usb_find_csint_desc(
+				alts->extra, alts->extralen, NULL, UAC_AS_GENERAL);
+		bmControls = as->bmControls;
+	}
+
+	if (!uac_v2v3_control_is_readable(bmControls,
+				UAC2_AS_VAL_ALT_SETTINGS))
+		return 0;
 
 	table = kcalloc(fp->nr_rates, sizeof(*table), GFP_KERNEL);
 	if (!table)
@@ -513,7 +545,9 @@ static int parse_audio_format_rates_v2v3(struct snd_usb_audio *chip,
 	unsigned char tmp[2], *data;
 	int nr_triplets, data_size, ret = 0, ret_l6;
 	int clock = snd_usb_clock_find_source(chip, fp, false);
+	struct usb_host_interface *ctrl_intf;
 
+	ctrl_intf = snd_usb_find_ctrl_interface(chip, fp->iface);
 	if (clock < 0) {
 		dev_err(&dev->dev,
 			"%s(): unable to find clock source (clock %d)\n",
@@ -525,7 +559,7 @@ static int parse_audio_format_rates_v2v3(struct snd_usb_audio *chip,
 	ret = snd_usb_ctl_msg(dev, usb_rcvctrlpipe(dev, 0), UAC2_CS_RANGE,
 			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_IN,
 			      UAC2_CS_CONTROL_SAM_FREQ << 8,
-			      snd_usb_ctrl_intf(chip) | (clock << 8),
+			      snd_usb_ctrl_intf(ctrl_intf) | (clock << 8),
 			      tmp, sizeof(tmp));
 
 	if (ret < 0) {
@@ -560,7 +594,7 @@ static int parse_audio_format_rates_v2v3(struct snd_usb_audio *chip,
 	ret = snd_usb_ctl_msg(dev, usb_rcvctrlpipe(dev, 0), UAC2_CS_RANGE,
 			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_IN,
 			      UAC2_CS_CONTROL_SAM_FREQ << 8,
-			      snd_usb_ctrl_intf(chip) | (clock << 8),
+			      snd_usb_ctrl_intf(ctrl_intf) | (clock << 8),
 			      data, data_size);
 
 	if (ret < 0) {

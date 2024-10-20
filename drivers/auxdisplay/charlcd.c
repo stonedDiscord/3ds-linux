@@ -17,7 +17,9 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
+#ifndef CONFIG_PANEL_BOOT_MESSAGE
 #include <generated/utsrelease.h>
+#endif
 
 #include "charlcd.h"
 
@@ -37,7 +39,7 @@ struct charlcd_priv {
 	bool must_clear;
 
 	/* contains the LCD config state */
-	unsigned long int flags;
+	unsigned long flags;
 
 	/* Current escape sequence and it's length or -1 if outside */
 	struct {
@@ -470,12 +472,14 @@ static ssize_t charlcd_write(struct file *file, const char __user *buf,
 	char c;
 
 	for (; count-- > 0; (*ppos)++, tmp++) {
-		if (!in_interrupt() && (((count + 1) & 0x1f) == 0))
+		if (((count + 1) & 0x1f) == 0) {
 			/*
-			 * let's be a little nice with other processes
-			 * that need some CPU
+			 * charlcd_write() is invoked as a VFS->write() callback
+			 * and as such it is always invoked from preemptible
+			 * context and may sleep.
 			 */
-			schedule();
+			cond_resched();
+		}
 
 		if (get_user(c, tmp))
 			return -EFAULT;
@@ -522,7 +526,6 @@ static const struct file_operations charlcd_fops = {
 	.write   = charlcd_write,
 	.open    = charlcd_open,
 	.release = charlcd_release,
-	.llseek  = no_llseek,
 };
 
 static struct miscdevice charlcd_dev = {
@@ -537,12 +540,8 @@ static void charlcd_puts(struct charlcd *lcd, const char *s)
 	int count = strlen(s);
 
 	for (; count-- > 0; tmp++) {
-		if (!in_interrupt() && (((count + 1) & 0x1f) == 0))
-			/*
-			 * let's be a little nice with other processes
-			 * that need some CPU
-			 */
-			schedule();
+		if (((count + 1) & 0x1f) == 0)
+			cond_resched();
 
 		charlcd_write_char(lcd, *tmp);
 	}
@@ -580,6 +579,9 @@ static int charlcd_init(struct charlcd *lcd)
 	 * Since charlcd_init_display() needs to write data, we have to
 	 * enable mark the LCD initialized just before.
 	 */
+	if (WARN_ON(!lcd->ops->init_display))
+		return -EINVAL;
+
 	ret = lcd->ops->init_display(lcd);
 	if (ret)
 		return ret;
@@ -639,9 +641,7 @@ static int panel_notify_sys(struct notifier_block *this, unsigned long code,
 }
 
 static struct notifier_block panel_notifier = {
-	panel_notify_sys,
-	NULL,
-	0
+	.notifier_call = panel_notify_sys,
 };
 
 int charlcd_register(struct charlcd *lcd)
@@ -679,4 +679,5 @@ int charlcd_unregister(struct charlcd *lcd)
 }
 EXPORT_SYMBOL_GPL(charlcd_unregister);
 
+MODULE_DESCRIPTION("Character LCD core support");
 MODULE_LICENSE("GPL");

@@ -72,6 +72,9 @@ static int sgx_release(struct inode *inode, struct file *file)
 		synchronize_srcu(&encl->srcu);
 		mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
 		kfree(encl_mm);
+
+		/* 'encl_mm' is gone, put encl_mm->encl reference: */
+		kref_put(&encl->refcount, sgx_encl_release);
 	}
 
 	kref_put(&encl->refcount, sgx_encl_release);
@@ -92,7 +95,7 @@ static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
 		return ret;
 
 	vma->vm_ops = &sgx_vm_ops;
-	vma->vm_flags |= VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP | VM_IO;
+	vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP | VM_IO);
 	vma->vm_private_data = encl;
 
 	return 0;
@@ -110,7 +113,7 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
 	if (flags & MAP_FIXED)
 		return addr;
 
-	return current->mm->get_unmapped_area(file, addr, len, pgoff, flags);
+	return mm_get_unmapped_area(current->mm, file, addr, len, pgoff, flags);
 }
 
 #ifdef CONFIG_COMPAT
@@ -133,22 +136,11 @@ static const struct file_operations sgx_encl_fops = {
 	.get_unmapped_area	= sgx_get_unmapped_area,
 };
 
-const struct file_operations sgx_provision_fops = {
-	.owner			= THIS_MODULE,
-};
-
 static struct miscdevice sgx_dev_enclave = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = "sgx_enclave",
 	.nodename = "sgx_enclave",
 	.fops = &sgx_encl_fops,
-};
-
-static struct miscdevice sgx_dev_provision = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = "sgx_provision",
-	.nodename = "sgx_provision",
-	.fops = &sgx_provision_fops,
 };
 
 int __init sgx_drv_init(void)
@@ -183,12 +175,6 @@ int __init sgx_drv_init(void)
 	ret = misc_register(&sgx_dev_enclave);
 	if (ret)
 		return ret;
-
-	ret = misc_register(&sgx_dev_provision);
-	if (ret) {
-		misc_deregister(&sgx_dev_enclave);
-		return ret;
-	}
 
 	return 0;
 }

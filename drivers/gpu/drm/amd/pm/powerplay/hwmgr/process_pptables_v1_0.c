@@ -200,7 +200,7 @@ static int get_platform_power_management_table(
 		struct pp_hwmgr *hwmgr,
 		ATOM_Tonga_PPM_Table *atom_ppm_table)
 {
-	struct phm_ppm_table *ptr = kzalloc(sizeof(ATOM_Tonga_PPM_Table), GFP_KERNEL);
+	struct phm_ppm_table *ptr = kzalloc(sizeof(*ptr), GFP_KERNEL);
 	struct phm_ppt_v1_information *pp_table_information =
 		(struct phm_ppt_v1_information *)(hwmgr->pptable);
 
@@ -978,8 +978,6 @@ static int init_thermal_controller(
 		hwmgr->thermal_controller.advanceFanControlParameters.usPWMHigh
 			= le16_to_cpu(tonga_fan_table->usPWMHigh);
 		hwmgr->thermal_controller.advanceFanControlParameters.usTMax
-			= 10900;                  /* hard coded */
-		hwmgr->thermal_controller.advanceFanControlParameters.usTMax
 			= le16_to_cpu(tonga_fan_table->usTMax);
 		hwmgr->thermal_controller.advanceFanControlParameters.ucFanControlMode
 			= tonga_fan_table->ucFanControlMode;
@@ -1362,6 +1360,7 @@ static int ppt_get_vce_state_table_entry_v1_0(struct pp_hwmgr *hwmgr, uint32_t i
  * @hwmgr: Pointer to the hardware manager.
  * @entry_index: The index of the entry to be extracted from the table.
  * @power_state: The address of the PowerState instance being created.
+ * @call_back_func: The function to call into to fill power state
  * Return: -1 if the entry cannot be retrieved.
  */
 int get_powerplay_table_entry_v1_0(struct pp_hwmgr *hwmgr,

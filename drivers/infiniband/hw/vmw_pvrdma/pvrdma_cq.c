@@ -94,13 +94,14 @@ int pvrdma_req_notify_cq(struct ib_cq *ibcq,
  * pvrdma_create_cq - create completion queue
  * @ibcq: Allocated CQ
  * @attr: completion queue attributes
- * @udata: user data
+ * @attrs: bundle
  *
  * @return: 0 on success
  */
 int pvrdma_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		     struct ib_udata *udata)
+		     struct uverbs_attr_bundle *attrs)
 {
+	struct ib_udata *udata = &attrs->driver_udata;
 	struct ib_device *ibdev = ibcq->device;
 	int entries = attr->cqe;
 	struct pvrdma_dev *dev = to_vdev(ibdev);
@@ -367,7 +368,7 @@ retry:
 	wc->dlid_path_bits = cqe->dlid_path_bits;
 	wc->port_num = cqe->port_num;
 	wc->vendor_err = cqe->vendor_err;
-	wc->network_hdr_type = cqe->network_hdr_type;
+	wc->network_hdr_type = pvrdma_network_type_to_ib(cqe->network_hdr_type);
 
 	/* Update shared ring state */
 	pvrdma_idx_ring_inc(&cq->ring_state->rx.cons_head, cq->ibcq.cqe);

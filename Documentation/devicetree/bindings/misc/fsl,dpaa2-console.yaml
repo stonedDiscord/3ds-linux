@@ -12,9 +12,10 @@ maintainers:
 
 properties:
   compatible:
-    const: "fsl,dpaa2-console"
+    const: fsl,dpaa2-console
 
   reg:
+    maxItems: 1
     description: A standard property. Specifies the region where the MCFBA
                 (MC firmware base address) register can be found.
 

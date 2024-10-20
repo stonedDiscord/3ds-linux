@@ -62,7 +62,7 @@ TRACE_EVENT(kvm_vcpu_wakeup,
 		  __entry->valid ? "valid" : "invalid")
 );
 
-#if defined(CONFIG_HAVE_KVM_IRQFD)
+#if defined(CONFIG_HAVE_KVM_IRQCHIP)
 TRACE_EVENT(kvm_set_irq,
 	TP_PROTO(unsigned int gsi, int level, int irq_source_id),
 	TP_ARGS(gsi, level, irq_source_id),
@@ -82,7 +82,7 @@ TRACE_EVENT(kvm_set_irq,
 	TP_printk("gsi %u level %d source %d",
 		  __entry->gsi, __entry->level, __entry->irq_source_id)
 );
-#endif /* defined(CONFIG_HAVE_KVM_IRQFD) */
+#endif /* defined(CONFIG_HAVE_KVM_IRQCHIP) */
 
 #if defined(__KVM_HAVE_IOAPIC)
 #define kvm_deliver_mode		\
@@ -170,7 +170,7 @@ TRACE_EVENT(kvm_msi_set_irq,
 
 #endif /* defined(__KVM_HAVE_IOAPIC) */
 
-#if defined(CONFIG_HAVE_KVM_IRQFD)
+#if defined(CONFIG_HAVE_KVM_IRQCHIP)
 
 #ifdef kvm_irqchips
 #define kvm_ack_irq_string "irqchip %s pin %u"
@@ -197,7 +197,7 @@ TRACE_EVENT(kvm_ack_irq,
 	TP_printk(kvm_ack_irq_string, kvm_ack_irq_parm)
 );
 
-#endif /* defined(CONFIG_HAVE_KVM_IRQFD) */
+#endif /* defined(CONFIG_HAVE_KVM_IRQCHIP) */
 
 
 
@@ -255,30 +255,6 @@ TRACE_EVENT(kvm_fpu,
 	TP_printk("%s", __print_symbolic(__entry->load, kvm_fpu_load_symbol))
 );
 
-TRACE_EVENT(kvm_age_page,
-	TP_PROTO(ulong gfn, int level, struct kvm_memory_slot *slot, int ref),
-	TP_ARGS(gfn, level, slot, ref),
-
-	TP_STRUCT__entry(
-		__field(	u64,	hva		)
-		__field(	u64,	gfn		)
-		__field(	u8,	level		)
-		__field(	u8,	referenced	)
-	),
-
-	TP_fast_assign(
-		__entry->gfn		= gfn;
-		__entry->level		= level;
-		__entry->hva		= ((gfn - slot->base_gfn) <<
-					    PAGE_SHIFT) + slot->userspace_addr;
-		__entry->referenced	= ref;
-	),
-
-	TP_printk("hva %llx gfn %llx level %u %s",
-		  __entry->hva, __entry->gfn, __entry->level,
-		  __entry->referenced ? "YOUNG" : "OLD")
-);
-
 #ifdef CONFIG_KVM_ASYNC_PF
 DECLARE_EVENT_CLASS(kvm_async_get_page_class,
 
@@ -306,7 +282,7 @@ DEFINE_EVENT(kvm_async_get_page_class, kvm_try_async_get_page,
 	TP_ARGS(gva, gfn)
 );
 
-DEFINE_EVENT(kvm_async_get_page_class, kvm_async_pf_doublefault,
+DEFINE_EVENT(kvm_async_get_page_class, kvm_async_pf_repeated_fault,
 
 	TP_PROTO(u64 gva, u64 gfn),
 
@@ -460,6 +436,57 @@ TRACE_EVENT(kvm_dirty_ring_exit,
 	),
 
 	TP_printk("vcpu %d", __entry->vcpu_id)
+);
+
+TRACE_EVENT(kvm_unmap_hva_range,
+	TP_PROTO(unsigned long start, unsigned long end),
+	TP_ARGS(start, end),
+
+	TP_STRUCT__entry(
+		__field(	unsigned long,	start		)
+		__field(	unsigned long,	end		)
+	),
+
+	TP_fast_assign(
+		__entry->start		= start;
+		__entry->end		= end;
+	),
+
+	TP_printk("mmu notifier unmap range: %#016lx -- %#016lx",
+		  __entry->start, __entry->end)
+);
+
+TRACE_EVENT(kvm_age_hva,
+	TP_PROTO(unsigned long start, unsigned long end),
+	TP_ARGS(start, end),
+
+	TP_STRUCT__entry(
+		__field(	unsigned long,	start		)
+		__field(	unsigned long,	end		)
+	),
+
+	TP_fast_assign(
+		__entry->start		= start;
+		__entry->end		= end;
+	),
+
+	TP_printk("mmu notifier age hva: %#016lx -- %#016lx",
+		  __entry->start, __entry->end)
+);
+
+TRACE_EVENT(kvm_test_age_hva,
+	TP_PROTO(unsigned long hva),
+	TP_ARGS(hva),
+
+	TP_STRUCT__entry(
+		__field(	unsigned long,	hva		)
+	),
+
+	TP_fast_assign(
+		__entry->hva		= hva;
+	),
+
+	TP_printk("mmu notifier test age hva: %#016lx", __entry->hva)
 );
 
 #endif /* _TRACE_KVM_MAIN_H */

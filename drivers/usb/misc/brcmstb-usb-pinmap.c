@@ -263,6 +263,8 @@ static int __init brcmstb_usb_pinmap_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!r)
+		return -EINVAL;
 
 	pdata = devm_kzalloc(&pdev->dev,
 			     sizeof(*pdata) +
@@ -291,6 +293,8 @@ static int __init brcmstb_usb_pinmap_probe(struct platform_device *pdev)
 
 		/* Enable interrupt for out pins */
 		irq = platform_get_irq(pdev, 0);
+		if (irq < 0)
+			return irq;
 		err = devm_request_irq(&pdev->dev, irq,
 				       brcmstb_usb_pinmap_ovr_isr,
 				       IRQF_TRIGGER_RISING,
@@ -331,6 +335,7 @@ static const struct of_device_id brcmstb_usb_pinmap_of_match[] = {
 	{ .compatible = "brcm,usb-pinmap" },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, brcmstb_usb_pinmap_of_match);
 
 static struct platform_driver brcmstb_usb_pinmap_driver = {
 	.driver = {

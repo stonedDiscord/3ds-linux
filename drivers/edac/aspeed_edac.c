@@ -254,8 +254,8 @@ static int init_csrows(struct mem_ctl_info *mci)
 		return rc;
 	}
 
-	dev_dbg(mci->pdev, "dt: /memory node resources: first page r.start=0x%x, resource_size=0x%x, PAGE_SHIFT macro=0x%x\n",
-		r.start, resource_size(&r), PAGE_SHIFT);
+	dev_dbg(mci->pdev, "dt: /memory node resources: first page %pR, PAGE_SHIFT macro=0x%x\n",
+		&r, PAGE_SHIFT);
 
 	csrow->first_page = r.start >> PAGE_SHIFT;
 	nr_pages = resource_size(&r) >> PAGE_SHIFT;
@@ -357,7 +357,7 @@ probe_exit02:
 }
 
 
-static int aspeed_remove(struct platform_device *pdev)
+static void aspeed_remove(struct platform_device *pdev)
 {
 	struct mem_ctl_info *mci;
 
@@ -369,8 +369,6 @@ static int aspeed_remove(struct platform_device *pdev)
 	mci = edac_mc_del_mc(&pdev->dev);
 	if (mci)
 		edac_mc_free(mci);
-
-	return 0;
 }
 
 
@@ -389,7 +387,7 @@ static struct platform_driver aspeed_driver = {
 		.of_match_table = aspeed_of_match
 	},
 	.probe		= aspeed_probe,
-	.remove		= aspeed_remove
+	.remove_new	= aspeed_remove
 };
 module_platform_driver(aspeed_driver);
 
